@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/treeverse/lakefs/pkg/gateway/sig"
+
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/fsnotify/fsnotify"
 	"github.com/go-co-op/gocron"
@@ -31,7 +33,6 @@ import (
 	"github.com/treeverse/lakefs/pkg/config"
 	"github.com/treeverse/lakefs/pkg/gateway"
 	"github.com/treeverse/lakefs/pkg/gateway/multipart"
-	"github.com/treeverse/lakefs/pkg/gateway/sig"
 	"github.com/treeverse/lakefs/pkg/graveler/ref"
 	"github.com/treeverse/lakefs/pkg/httputil"
 	"github.com/treeverse/lakefs/pkg/kv"
@@ -340,11 +341,12 @@ var runCmd = &cobra.Command{
 		server := &http.Server{
 			Addr:              cfg.ListenAddress,
 			ReadHeaderTimeout: time.Minute,
+			// Handler:           apiHandler,
 			Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				// If the request has the S3 GW domain (exact or subdomain) - or carries an AWS sig, serve S3GW
-				if httputil.HostMatches(request, cfg.Gateways.S3.DomainNames) ||
+				if request.ProtoMajor != 2 && (httputil.HostMatches(request, cfg.Gateways.S3.DomainNames) ||
 					httputil.HostSubdomainOf(request, cfg.Gateways.S3.DomainNames) ||
-					sig.IsAWSSignedRequest(request) {
+					sig.IsAWSSignedRequest(request)) {
 					s3gatewayHandler.ServeHTTP(writer, request)
 					return
 				}

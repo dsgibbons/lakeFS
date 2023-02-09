@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package lakefs.v1;
+
+option go_package = "github.com/treeverse/lakefs/gen/proto/go/lakefs/v1;lakefsv1";
+
+import "google/protobuf/timestamp.proto";
+
+message GetObjectRequest {
+  string repository = 1;
+  string ref = 2;
+  string path = 3;
+  string range = 4;
+  bool pre_signed = 5;
+}
+
+//message GetObjectInfo {
+//  string etag = 1;
+//  string last_modified = 2;
+//  string content_type = 3;
+//  int64 content_length = 4;
+//  string content_range = 5;
+//}
+
+message GetObjectResponse {
+  bytes chunk = 1;
+  string pre_signed_url = 2;
+}
+
+
+message UploadObjectInfo {
+  string repository = 1;
+  string branch = 2;
+  string path = 3;
+}
+message UploadObjectRequest {
+  oneof data {
+    UploadObjectInfo info = 1;
+    bytes chunk = 2;
+  }
+}
+
+message UploadObjectResponse {
+    string physical_address = 1;
+    string checksum = 2;
+    int64 size_bytes = 3;
+    google.protobuf.Timestamp mtime = 4;
+    map<string, string> metadata = 5;
+    string content_type = 6;
+
+}
+
+service LakeFSService {
+    rpc GetObject(GetObjectRequest) returns (stream GetObjectResponse) {}
+    rpc UploadObject(stream UploadObjectRequest) returns (UploadObjectResponse) {}
+}

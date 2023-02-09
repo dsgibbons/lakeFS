@@ -5,7 +5,9 @@ package api
 import (
 	"errors"
 	"io"
+	"net"
 	"net/http"
+	"strings"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/getkin/kin-openapi/openapi3"
@@ -15,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/sessions"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	lakefsv1 "github.com/treeverse/lakefs/gen/proto/go/lakefs/v1"
 	"github.com/treeverse/lakefs/pkg/api/params"
 	"github.com/treeverse/lakefs/pkg/auth"
 	"github.com/treeverse/lakefs/pkg/auth/email"
@@ -29,6 +32,7 @@ import (
 	"github.com/treeverse/lakefs/pkg/templater"
 	"github.com/treeverse/lakefs/pkg/upload"
 	"golang.org/x/oauth2"
+	"google.golang.org/grpc"
 )
 
 const (
@@ -39,28 +43,7 @@ const (
 	extensionValidationExcludeBody = "x-validation-exclude-body"
 )
 
-func Serve(
-	cfg *config.Config,
-	catalog catalog.Interface,
-	middlewareAuthenticator auth.Authenticator,
-	controllerAuthenticator auth.Authenticator,
-	authService auth.Service,
-	blockAdapter block.Adapter,
-	metadataManager auth.MetadataManager,
-	migrator Migrator,
-	collector stats.Collector,
-	cloudMetadataProvider cloud.MetadataProvider,
-	actions actionsHandler,
-	auditChecker AuditChecker,
-	logger logging.Logger,
-	emailer *email.Emailer,
-	templater templater.Service,
-	gatewayDomains []string,
-	snippets []params.CodeSnippet,
-	oidcProvider *oidc.Provider,
-	oauthConfig *oauth2.Config,
-	pathProvider upload.PathProvider,
-) http.Handler {
+func Serve(cfg *config.Config, catalog catalog.Interface, middlewareAuthenticator auth.Authenticator, controllerAuthenticator auth.Authenticator, authService auth.Service, blockAdapter block.Adapter, metadataManager auth.MetadataManager, migrator Migrator, collector stats.Collector, cloudMetadataProvider cloud.MetadataProvider, actions actionsHandler, auditChecker AuditChecker, logger logging.Logger, emailer *email.Emailer, templater templater.Service, gatewayDomains []string, snippets []params.CodeSnippet, oidcProvider *oidc.Provider, oauthConfig *oauth2.Config, pathProvider upload.PathProvider) http.Handler {
 	logger.Info("initialize OpenAPI server")
 	swagger, err := GetSwagger()
 	if err != nil {
@@ -127,9 +110,35 @@ func Serve(
 		// and returns a compatible response
 		rootHandler = NewS3GatewayEndpointErrorHandler(gatewayDomains)
 	}
+
+	service := &Service{
+		Catalog:      controller.Catalog,
+		BlockAdapter: controller.BlockAdapter,
+	}
+
+	grpcServer := grpc.NewServer()
+	lakefsv1.RegisterLakeFSServiceServer(grpcServer, service)
 	r.Mount("/", rootHandler)
 
-	return r
+	listenOn := ":8080"
+	listener, err := net.Listen("tcp", listenOn)
+	if err != nil {
+		panic(err)
+	}
+
+	go func() {
+		if err := grpcServer.Serve(listener); err != nil {
+			panic(err)
+		}
+	}()
+
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.ProtoMajor == 2 && strings.HasPrefix(request.Header.Get("Content-Type"), "application/grpc") {
+			grpcServer.ServeHTTP(writer, request)
+		} else {
+			r.ServeHTTP(writer, request)
+		}
+	})
 }
 
 func swaggerSpecHandler(w http.ResponseWriter, _ *http.Request) {

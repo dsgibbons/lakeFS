@@ -23,6 +23,7 @@ import (
 	"github.com/davecgh/go-spew/spew"
 	"github.com/go-openapi/swag"
 	"github.com/gorilla/sessions"
+	lakefsv1 "github.com/treeverse/lakefs/gen/proto/go/lakefs/v1"
 	"github.com/treeverse/lakefs/pkg/actions"
 	"github.com/treeverse/lakefs/pkg/auth"
 	"github.com/treeverse/lakefs/pkg/auth/email"
@@ -42,6 +43,9 @@ import (
 	"github.com/treeverse/lakefs/pkg/templater"
 	"github.com/treeverse/lakefs/pkg/upload"
 	"github.com/treeverse/lakefs/pkg/version"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 const (
@@ -99,6 +103,103 @@ type Controller struct {
 	sessionStore          sessions.Store
 	oidcAuthenticator     *oidc.Authenticator
 	PathProvider          upload.PathProvider
+}
+
+type Service struct {
+	lakefsv1.UnimplementedLakeFSServiceServer
+	Catalog      catalog.Interface
+	BlockAdapter block.Adapter
+}
+
+func (s *Service) GetObject(r *lakefsv1.GetObjectRequest, server lakefsv1.LakeFSService_GetObjectServer) error {
+	ctx := server.Context()
+	repo, err := s.Catalog.GetRepository(ctx, r.Repository)
+	if err != nil {
+		return err
+	}
+
+	// read the FS entry
+	entry, err := s.Catalog.GetEntry(ctx, r.Repository, r.Ref, r.Path, catalog.GetEntryParams{})
+	if err != nil {
+		return err
+	}
+	if entry.Expired {
+		return status.Error(codes.Unknown, "object expired")
+	}
+
+	// if pre-sign, return a redirect
+	pointer := block.ObjectPointer{StorageNamespace: repo.StorageNamespace, Identifier: entry.PhysicalAddress}
+	if r.PreSigned {
+		location, err := s.BlockAdapter.GetPreSignedURL(ctx, pointer, block.PreSignModeRead)
+		if err != nil {
+			return err
+		}
+		return server.Send(&lakefsv1.GetObjectResponse{PreSignedUrl: location})
+	}
+
+	// setup response
+	var reader io.ReadCloser
+
+	// handle partial response if byte range supplied
+	if r.Range != "" {
+		rng, err := httputil.ParseRange(r.Range, entry.Size)
+		if err != nil {
+			return status.Error(codes.Unknown, "Requested Range Not Satisfiable")
+		}
+		reader, err = s.BlockAdapter.GetRange(ctx, pointer, rng.StartOffset, rng.EndOffset)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			_ = reader.Close()
+		}()
+		if err := server.SetHeader(metadata.New(map[string]string{
+			"Content-Range":  fmt.Sprintf("bytes %d-%d/%d", rng.StartOffset, rng.EndOffset, entry.Size),
+			"Content-Length": fmt.Sprintf("%d", rng.EndOffset-rng.StartOffset+1),
+		})); err != nil {
+			return err
+		}
+	} else {
+		reader, err = s.BlockAdapter.Get(ctx, pointer, entry.Size)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			_ = reader.Close()
+		}()
+		if err := server.SetHeader(metadata.New(map[string]string{
+			"Content-Length": fmt.Sprint(entry.Size),
+		})); err != nil {
+			return err
+		}
+	}
+
+	etag := httputil.ETag(entry.Checksum)
+	lastModified := httputil.HeaderTimestamp(entry.CreationDate)
+	if err := server.SetHeader(metadata.New(map[string]string{
+		"ETag":          etag,
+		"Last-Modified": lastModified,
+		"Content-Type":  entry.ContentType,
+	})); err != nil {
+		return err
+	}
+
+	buf := make([]byte, 24*1024)
+	for {
+		num, err := reader.Read(buf)
+		if num > 0 {
+			if err := server.Send(&lakefsv1.GetObjectResponse{Chunk: buf[:num]}); err != nil {
+				return err
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *Controller) PrepareGarbageCollectionUncommitted(w http.ResponseWriter, r *http.Request, body PrepareGarbageCollectionUncommittedJSONRequestBody, repository string) {
