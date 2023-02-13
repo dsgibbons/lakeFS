@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/protobuf/types/known/timestamppb"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/go-openapi/swag"
@@ -109,6 +111,7 @@ type Service struct {
 	lakefsv1.UnimplementedLakeFSServiceServer
 	Catalog      catalog.Interface
 	BlockAdapter block.Adapter
+	PathProvider upload.PathProvider
 }
 
 func (s *Service) GetObject(r *lakefsv1.GetObjectRequest, server lakefsv1.LakeFSService_GetObjectServer) error {
@@ -200,6 +203,108 @@ func (s *Service) GetObject(r *lakefsv1.GetObjectRequest, server lakefsv1.LakeFS
 		}
 	}
 	return nil
+}
+
+type UploadReader struct {
+	Server lakefsv1.LakeFSService_UploadObjectServer
+	chunk  []byte
+}
+
+func (u *UploadReader) Read(p []byte) (n int, err error) {
+	written := 0
+	for written < len(p) {
+		if len(u.chunk) == 0 {
+			recv, err := u.Server.Recv()
+			if err == io.EOF {
+				return written, io.EOF
+			}
+			if err != nil {
+				return 0, err
+			}
+			u.chunk = recv.GetChunk()
+			if u.chunk == nil {
+				return 0, io.EOF
+			}
+		}
+		if len(u.chunk) > 0 {
+			w := copy(p[written:], u.chunk)
+			written += w
+			u.chunk = u.chunk[w:]
+		}
+	}
+	return written, nil
+}
+
+func (s *Service) UploadObject(server lakefsv1.LakeFSService_UploadObjectServer) error {
+	recv, err := server.Recv()
+	if err == io.EOF {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	// upload data
+	info := recv.GetInfo()
+	if info == nil {
+		return status.Error(codes.Unknown, "info should be sent first")
+	}
+	ctx := server.Context()
+	repo, err := s.Catalog.GetRepository(ctx, info.Repository)
+	if err != nil {
+		return err
+	}
+
+	// check if branch exists - it is still a possibility, but we don't want to upload large object when the branch was not there in the first place
+	branchExists, err := s.Catalog.BranchExists(ctx, info.Repository, info.Branch)
+	if err != nil {
+		return err
+	}
+	if !branchExists {
+		return status.Error(codes.NotFound, fmt.Sprintf("branch '%s' not found", info.Branch))
+	}
+
+	// read chunks
+	reader := &UploadReader{
+		Server: server,
+	}
+	address := s.PathProvider.NewPath()
+	blob, err := upload.WriteBlob(ctx, s.BlockAdapter, repo.StorageNamespace, address, reader, -1, block.PutOpts{})
+	if err != nil {
+		return err
+	}
+
+	// write metadata
+	writeTime := time.Now()
+	entryBuilder := catalog.NewDBEntryBuilder().
+		Path(info.Path).
+		PhysicalAddress(blob.PhysicalAddress).
+		CreationDate(writeTime).
+		Size(blob.Size).
+		Checksum(blob.Checksum).
+		ContentType(info.ContentType).
+		Metadata(info.Metadata)
+	if blob.RelativePath {
+		entryBuilder.AddressType(catalog.AddressTypeRelative)
+	} else {
+		entryBuilder.AddressType(catalog.AddressTypeFull)
+	}
+	entry := entryBuilder.Build()
+
+	err = s.Catalog.CreateEntry(ctx, info.Repository, info.Branch, entry, graveler.WithIfAbsent(!info.AllowOverwrite))
+	if errors.Is(err, graveler.ErrPreconditionFailed) {
+		return status.Error(codes.FailedPrecondition, "path already exists")
+	}
+
+	resp := &lakefsv1.UploadObjectResponse{
+		Path:            entry.Path,
+		PhysicalAddress: entry.PhysicalAddress,
+		Checksum:        entry.Checksum,
+		SizeBytes:       entry.Size,
+		Mtime:           timestamppb.New(entry.CreationDate),
+		Metadata:        entry.Metadata,
+		ContentType:     entry.ContentType,
+	}
+	return server.SendAndClose(resp)
 }
 
 func (c *Controller) PrepareGarbageCollectionUncommitted(w http.ResponseWriter, r *http.Request, body PrepareGarbageCollectionUncommittedJSONRequestBody, repository string) {

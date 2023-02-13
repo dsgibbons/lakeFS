@@ -114,6 +114,7 @@ func Serve(cfg *config.Config, catalog catalog.Interface, middlewareAuthenticato
 	service := &Service{
 		Catalog:      controller.Catalog,
 		BlockAdapter: controller.BlockAdapter,
+		PathProvider: controller.PathProvider,
 	}
 
 	grpcServer := grpc.NewServer()

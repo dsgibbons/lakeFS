@@ -15,6 +15,14 @@ import (
 	"sync"
 	"sync/atomic"
 
+	lakefsv1 "github.com/treeverse/lakefs/gen/proto/go/lakefs/v1"
+
+	"github.com/sirupsen/logrus"
+
+	"google.golang.org/grpc/credentials/insecure"
+
+	"google.golang.org/grpc"
+
 	"github.com/go-openapi/swag"
 	"github.com/spf13/cobra"
 	"github.com/treeverse/lakefs/pkg/api"
@@ -241,6 +249,13 @@ var fsUploadCmd = &cobra.Command{
 	ValidArgsFunction: ValidArgsRepository,
 	Run: func(cmd *cobra.Command, args []string) {
 		client := getClient()
+
+		clientConn, err := getGrpcClient()
+		if err != nil {
+			logrus.WithError(err).Fatalln(err)
+		}
+		defer clientConn.Close()
+		lakefsClient := lakefsv1.NewLakeFSServiceClient(clientConn)
 		pathURI := MustParsePathURI("path", args[0])
 		flagSet := cmd.Flags()
 		source := MustString(flagSet.GetString("source"))
@@ -252,10 +267,70 @@ var fsUploadCmd = &cobra.Command{
 		ctx := cmd.Context()
 		transport := transportMethodFromFlags(direct, preSignMode)
 		if !recursive {
-			stat, err := upload(ctx, client, source, pathURI, contentType, transport)
+			// upload request
+			uploadObjectClient, err := lakefsClient.UploadObject(ctx)
 			if err != nil {
 				DieErr(err)
 			}
+			// upload request - file info
+			req := lakefsv1.UploadObjectRequest{
+				Data: &lakefsv1.UploadObjectRequest_Info{
+					Info: &lakefsv1.UploadObjectInfo{
+						Repository:  pathURI.Repository,
+						Branch:      pathURI.Ref,
+						Path:        api.StringValue(pathURI.Path),
+						ContentType: contentType,
+					},
+				},
+			}
+			err = uploadObjectClient.Send(&req)
+			if err != nil {
+				DieErr(err)
+			}
+
+			// upload request - content
+			fp := OpenByPath(source)
+			defer func() {
+				_ = fp.Close()
+			}()
+			buf := make([]byte, 1024*8)
+			for {
+				n, err := fp.Read(buf)
+				if n > 0 {
+					req := lakefsv1.UploadObjectRequest{
+						Data: &lakefsv1.UploadObjectRequest_Chunk{
+							Chunk: buf[:n],
+						},
+					}
+					err = uploadObjectClient.Send(&req)
+					if err != nil {
+						DieErr(err)
+					}
+				}
+				if err != nil {
+					if err == io.EOF {
+						break
+					}
+					DieErr(err)
+				}
+			}
+			objectResponse, err := uploadObjectClient.CloseAndRecv()
+			if err != nil {
+				DieErr(err)
+			}
+
+			stat := api.ObjectStats{
+				Checksum:        objectResponse.Checksum,
+				ContentType:     api.StringPtr(objectResponse.ContentType),
+				Mtime:           objectResponse.Mtime.GetSeconds(),
+				Path:            objectResponse.Path,
+				PhysicalAddress: objectResponse.PhysicalAddress,
+				SizeBytes:       api.Int64Ptr(objectResponse.SizeBytes),
+			}
+			//stat, err := upload(ctx, client, source, pathURI, contentType, transport)
+			//if err != nil {
+			//	DieErr(err)
+			//}
 			Write(fsStatTemplate, stat)
 			return
 		}
@@ -264,7 +339,7 @@ var fsUploadCmd = &cobra.Command{
 			Bytes int64
 			Count int64
 		}
-		err := filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
+		err = filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return fmt.Errorf("traverse %s: %w", path, err)
 			}
@@ -290,6 +365,10 @@ var fsUploadCmd = &cobra.Command{
 		}
 		Write(fsRecursiveTemplate, totals)
 	},
+}
+
+func getGrpcClient() (*grpc.ClientConn, error) {
+	return grpc.Dial(":8080", grpc.WithBlock(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 }
 
 func transportMethodFromFlags(direct bool, preSign bool) transportMethod {

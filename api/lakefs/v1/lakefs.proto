@@ -32,7 +32,11 @@ message UploadObjectInfo {
   string repository = 1;
   string branch = 2;
   string path = 3;
+  string content_type = 4;
+  map<string, string> metadata = 5;
+  bool allow_overwrite = 6;
 }
+
 message UploadObjectRequest {
   oneof data {
     UploadObjectInfo info = 1;
@@ -41,13 +45,13 @@ message UploadObjectRequest {
 }
 
 message UploadObjectResponse {
-    string physical_address = 1;
-    string checksum = 2;
-    int64 size_bytes = 3;
-    google.protobuf.Timestamp mtime = 4;
-    map<string, string> metadata = 5;
-    string content_type = 6;
-
+  string path = 1;
+  string physical_address = 2;
+  string checksum = 3;
+  int64 size_bytes = 4;
+  google.protobuf.Timestamp mtime = 5;
+  map<string, string> metadata = 6;
+  string content_type = 7;
 }
 
 service LakeFSService {
