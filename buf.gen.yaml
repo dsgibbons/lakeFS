@@ -3,13 +3,9 @@ plugins:
   - name: go
     out: gen/proto/go
     opt: paths=source_relative
-  - name: go-grpc
-    out: gen/proto/go
-    opt:
-      - paths=source_relative
-#  - name: grpc-gateway
-#    out: gen/proto/go
-#    opt:
-#      - paths=source_relative
-#  - name: openapiv2
-#    out: gen
+  #- name: go-grpc
+    #out: gen/proto/go
+    #opt: paths=source_relative
+  - name: connect-go
+    out: gen
+    opt: paths=source_relative

@@ -19,13 +19,10 @@ import (
 	"strings"
 	"time"
 
-	"google.golang.org/protobuf/types/known/timestamppb"
-
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/go-openapi/swag"
 	"github.com/gorilla/sessions"
-	lakefsv1 "github.com/treeverse/lakefs/gen/proto/go/lakefs/v1"
 	"github.com/treeverse/lakefs/pkg/actions"
 	"github.com/treeverse/lakefs/pkg/auth"
 	"github.com/treeverse/lakefs/pkg/auth/email"
@@ -45,9 +42,6 @@ import (
 	"github.com/treeverse/lakefs/pkg/templater"
 	"github.com/treeverse/lakefs/pkg/upload"
 	"github.com/treeverse/lakefs/pkg/version"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
 )
 
 const (
@@ -105,206 +99,6 @@ type Controller struct {
 	sessionStore          sessions.Store
 	oidcAuthenticator     *oidc.Authenticator
 	PathProvider          upload.PathProvider
-}
-
-type Service struct {
-	lakefsv1.UnimplementedLakeFSServiceServer
-	Catalog      catalog.Interface
-	BlockAdapter block.Adapter
-	PathProvider upload.PathProvider
-}
-
-func (s *Service) GetObject(r *lakefsv1.GetObjectRequest, server lakefsv1.LakeFSService_GetObjectServer) error {
-	ctx := server.Context()
-	repo, err := s.Catalog.GetRepository(ctx, r.Repository)
-	if err != nil {
-		return err
-	}
-
-	// read the FS entry
-	entry, err := s.Catalog.GetEntry(ctx, r.Repository, r.Ref, r.Path, catalog.GetEntryParams{})
-	if err != nil {
-		return err
-	}
-	if entry.Expired {
-		return status.Error(codes.Unknown, "object expired")
-	}
-
-	// if pre-sign, return a redirect
-	pointer := block.ObjectPointer{StorageNamespace: repo.StorageNamespace, Identifier: entry.PhysicalAddress}
-	if r.PreSigned {
-		location, err := s.BlockAdapter.GetPreSignedURL(ctx, pointer, block.PreSignModeRead)
-		if err != nil {
-			return err
-		}
-		return server.Send(&lakefsv1.GetObjectResponse{PreSignedUrl: location})
-	}
-
-	// setup response
-	var reader io.ReadCloser
-
-	// handle partial response if byte range supplied
-	if r.Range != "" {
-		rng, err := httputil.ParseRange(r.Range, entry.Size)
-		if err != nil {
-			return status.Error(codes.Unknown, "Requested Range Not Satisfiable")
-		}
-		reader, err = s.BlockAdapter.GetRange(ctx, pointer, rng.StartOffset, rng.EndOffset)
-		if err != nil {
-			return err
-		}
-		defer func() {
-			_ = reader.Close()
-		}()
-		if err := server.SetHeader(metadata.New(map[string]string{
-			"Content-Range":  fmt.Sprintf("bytes %d-%d/%d", rng.StartOffset, rng.EndOffset, entry.Size),
-			"Content-Length": fmt.Sprintf("%d", rng.EndOffset-rng.StartOffset+1),
-		})); err != nil {
-			return err
-		}
-	} else {
-		reader, err = s.BlockAdapter.Get(ctx, pointer, entry.Size)
-		if err != nil {
-			return err
-		}
-		defer func() {
-			_ = reader.Close()
-		}()
-		if err := server.SetHeader(metadata.New(map[string]string{
-			"Content-Length": fmt.Sprint(entry.Size),
-		})); err != nil {
-			return err
-		}
-	}
-
-	etag := httputil.ETag(entry.Checksum)
-	lastModified := httputil.HeaderTimestamp(entry.CreationDate)
-	if err := server.SetHeader(metadata.New(map[string]string{
-		"ETag":          etag,
-		"Last-Modified": lastModified,
-		"Content-Type":  entry.ContentType,
-	})); err != nil {
-		return err
-	}
-
-	buf := make([]byte, 24*1024)
-	for {
-		num, err := reader.Read(buf)
-		if num > 0 {
-			if err := server.Send(&lakefsv1.GetObjectResponse{Chunk: buf[:num]}); err != nil {
-				return err
-			}
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-type UploadReader struct {
-	Server lakefsv1.LakeFSService_UploadObjectServer
-	chunk  []byte
-}
-
-func (u *UploadReader) Read(p []byte) (n int, err error) {
-	written := 0
-	for written < len(p) {
-		if len(u.chunk) == 0 {
-			recv, err := u.Server.Recv()
-			if err == io.EOF {
-				return written, io.EOF
-			}
-			if err != nil {
-				return 0, err
-			}
-			u.chunk = recv.GetChunk()
-			if u.chunk == nil {
-				return 0, io.EOF
-			}
-		}
-		if len(u.chunk) > 0 {
-			w := copy(p[written:], u.chunk)
-			written += w
-			u.chunk = u.chunk[w:]
-		}
-	}
-	return written, nil
-}
-
-func (s *Service) UploadObject(server lakefsv1.LakeFSService_UploadObjectServer) error {
-	recv, err := server.Recv()
-	if err == io.EOF {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	// upload data
-	info := recv.GetInfo()
-	if info == nil {
-		return status.Error(codes.Unknown, "info should be sent first")
-	}
-	ctx := server.Context()
-	repo, err := s.Catalog.GetRepository(ctx, info.Repository)
-	if err != nil {
-		return err
-	}
-
-	// check if branch exists - it is still a possibility, but we don't want to upload large object when the branch was not there in the first place
-	branchExists, err := s.Catalog.BranchExists(ctx, info.Repository, info.Branch)
-	if err != nil {
-		return err
-	}
-	if !branchExists {
-		return status.Error(codes.NotFound, fmt.Sprintf("branch '%s' not found", info.Branch))
-	}
-
-	// read chunks
-	reader := &UploadReader{
-		Server: server,
-	}
-	address := s.PathProvider.NewPath()
-	blob, err := upload.WriteBlob(ctx, s.BlockAdapter, repo.StorageNamespace, address, reader, -1, block.PutOpts{})
-	if err != nil {
-		return err
-	}
-
-	// write metadata
-	writeTime := time.Now()
-	entryBuilder := catalog.NewDBEntryBuilder().
-		Path(info.Path).
-		PhysicalAddress(blob.PhysicalAddress).
-		CreationDate(writeTime).
-		Size(blob.Size).
-		Checksum(blob.Checksum).
-		ContentType(info.ContentType).
-		Metadata(info.Metadata)
-	if blob.RelativePath {
-		entryBuilder.AddressType(catalog.AddressTypeRelative)
-	} else {
-		entryBuilder.AddressType(catalog.AddressTypeFull)
-	}
-	entry := entryBuilder.Build()
-
-	err = s.Catalog.CreateEntry(ctx, info.Repository, info.Branch, entry, graveler.WithIfAbsent(!info.AllowOverwrite))
-	if errors.Is(err, graveler.ErrPreconditionFailed) {
-		return status.Error(codes.FailedPrecondition, "path already exists")
-	}
-
-	resp := &lakefsv1.UploadObjectResponse{
-		Path:            entry.Path,
-		PhysicalAddress: entry.PhysicalAddress,
-		Checksum:        entry.Checksum,
-		SizeBytes:       entry.Size,
-		Mtime:           timestamppb.New(entry.CreationDate),
-		Metadata:        entry.Metadata,
-		ContentType:     entry.ContentType,
-	}
-	return server.SendAndClose(resp)
 }
 
 func (c *Controller) PrepareGarbageCollectionUncommitted(w http.ResponseWriter, r *http.Request, body PrepareGarbageCollectionUncommittedJSONRequestBody, repository string) {

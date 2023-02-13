@@ -15,16 +15,11 @@ import (
 	"sync"
 	"sync/atomic"
 
-	lakefsv1 "github.com/treeverse/lakefs/gen/proto/go/lakefs/v1"
-
-	"github.com/sirupsen/logrus"
-
-	"google.golang.org/grpc/credentials/insecure"
-
-	"google.golang.org/grpc"
-
+	"github.com/bufbuild/connect-go"
 	"github.com/go-openapi/swag"
 	"github.com/spf13/cobra"
+	"github.com/treeverse/lakefs/gen/lakefs/v1/lakefsv1connect"
+	lakefsv1 "github.com/treeverse/lakefs/gen/proto/go/lakefs/v1"
 	"github.com/treeverse/lakefs/pkg/api"
 	"github.com/treeverse/lakefs/pkg/api/helpers"
 	"github.com/treeverse/lakefs/pkg/uri"
@@ -77,7 +72,8 @@ var fsStatCmd = &cobra.Command{
 }
 
 const fsLsTemplate = `{{ range $val := . -}}
-{{ $val.PathType|ljust 12 }}    {{ if eq $val.PathType "object" }}{{ $val.Mtime|date|ljust 29 }}    {{ $val.SizeBytes|human_bytes|ljust 12 }}{{ else }}                                            {{ end }}    {{ $val.Path|yellow }}
+{{ if eq $val.PathType 1 -}}
+OBJECT  {{ $val.Mtime.GetSeconds|date|ljust 30 }} {{ $val.SizeBytes|human_bytes|ljust 14 }}{{ else }}PRE                                                  {{ end }}    {{ $val.Path|yellow }}
 {{ end -}}
 `
 
@@ -87,7 +83,11 @@ var fsListCmd = &cobra.Command{
 	Args:              cobra.ExactArgs(1),
 	ValidArgsFunction: ValidArgsRepository,
 	Run: func(cmd *cobra.Command, args []string) {
-		client := getClient()
+		grpcClient := lakefsv1connect.NewLakeFSServiceClient(
+			http.DefaultClient,
+			"http://localhost:8000",
+		)
+
 		pathURI := MustParsePathURI("path", args[0])
 		recursive, _ := cmd.Flags().GetBool("recursive")
 		prefix := *pathURI.Path
@@ -98,39 +98,36 @@ var fsListCmd = &cobra.Command{
 			trimPrefix = prefix[:idx+1]
 		}
 		// delimiter used for listing
-		var paramsDelimiter api.PaginationDelimiter
+		var delimiter string
 		if !recursive {
-			paramsDelimiter = PathDelimiter
+			delimiter = PathDelimiter
 		}
-		var from string
+		var nextPageToken string
 		for {
-			pfx := api.PaginationPrefix(prefix)
-			params := &api.ListObjectsParams{
-				Prefix:    &pfx,
-				After:     api.PaginationAfterPtr(from),
-				Delimiter: &paramsDelimiter,
-			}
-			resp, err := client.ListObjectsWithResponse(cmd.Context(), pathURI.Repository, pathURI.Ref, params)
-			DieOnErrorOrUnexpectedStatusCode(resp, err, http.StatusOK)
-			if resp.JSON200 == nil {
-				Die("Bad response from server", 1)
+			resp, err := grpcClient.ListObjects(cmd.Context(), connect.NewRequest(&lakefsv1.ListObjectsRequest{
+				Repository:   pathURI.Repository,
+				Ref:          pathURI.Ref,
+				UserMetadata: true,
+				Delimiter:    delimiter,
+				Prefix:       prefix,
+				PageToken:    nextPageToken,
+			}))
+			if err != nil {
+				DieErr(err)
 			}
 
-			results := resp.JSON200.Results
 			// trim prefix if non-recursive
 			if !recursive {
-				for i := range results {
-					trimmed := strings.TrimPrefix(results[i].Path, trimPrefix)
-					results[i].Path = trimmed
+				for i := range resp.Msg.Objects {
+					resp.Msg.Objects[i].Path = strings.TrimPrefix(resp.Msg.Objects[i].Path, trimPrefix)
 				}
 			}
+			Write(fsLsTemplate, resp.Msg.Objects)
 
-			Write(fsLsTemplate, results)
-			pagination := resp.JSON200.Pagination
-			if !pagination.HasMore {
+			if resp.Msg.NextPageToken == "" {
 				break
 			}
-			from = pagination.NextOffset
+			nextPageToken = resp.Msg.NextPageToken
 		}
 	},
 }
@@ -250,12 +247,10 @@ var fsUploadCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		client := getClient()
 
-		clientConn, err := getGrpcClient()
-		if err != nil {
-			logrus.WithError(err).Fatalln(err)
-		}
-		defer clientConn.Close()
-		lakefsClient := lakefsv1.NewLakeFSServiceClient(clientConn)
+		grpcClient := lakefsv1connect.NewLakeFSServiceClient(
+			http.DefaultClient,
+			"http://localhost:8000",
+		)
 		pathURI := MustParsePathURI("path", args[0])
 		flagSet := cmd.Flags()
 		source := MustString(flagSet.GetString("source"))
@@ -268,12 +263,10 @@ var fsUploadCmd = &cobra.Command{
 		transport := transportMethodFromFlags(direct, preSignMode)
 		if !recursive {
 			// upload request
-			uploadObjectClient, err := lakefsClient.UploadObject(ctx)
-			if err != nil {
-				DieErr(err)
-			}
+			stream := grpcClient.UploadObject(ctx)
+
 			// upload request - file info
-			req := lakefsv1.UploadObjectRequest{
+			if err := stream.Send(&lakefsv1.UploadObjectRequest{
 				Data: &lakefsv1.UploadObjectRequest_Info{
 					Info: &lakefsv1.UploadObjectInfo{
 						Repository:  pathURI.Repository,
@@ -282,9 +275,7 @@ var fsUploadCmd = &cobra.Command{
 						ContentType: contentType,
 					},
 				},
-			}
-			err = uploadObjectClient.Send(&req)
-			if err != nil {
+			}); err != nil {
 				DieErr(err)
 			}
 
@@ -297,13 +288,11 @@ var fsUploadCmd = &cobra.Command{
 			for {
 				n, err := fp.Read(buf)
 				if n > 0 {
-					req := lakefsv1.UploadObjectRequest{
+					if err := stream.Send(&lakefsv1.UploadObjectRequest{
 						Data: &lakefsv1.UploadObjectRequest_Chunk{
 							Chunk: buf[:n],
 						},
-					}
-					err = uploadObjectClient.Send(&req)
-					if err != nil {
+					}); err != nil {
 						DieErr(err)
 					}
 				}
@@ -314,23 +303,19 @@ var fsUploadCmd = &cobra.Command{
 					DieErr(err)
 				}
 			}
-			objectResponse, err := uploadObjectClient.CloseAndRecv()
+			resp, err := stream.CloseAndReceive()
 			if err != nil {
 				DieErr(err)
 			}
 
 			stat := api.ObjectStats{
-				Checksum:        objectResponse.Checksum,
-				ContentType:     api.StringPtr(objectResponse.ContentType),
-				Mtime:           objectResponse.Mtime.GetSeconds(),
-				Path:            objectResponse.Path,
-				PhysicalAddress: objectResponse.PhysicalAddress,
-				SizeBytes:       api.Int64Ptr(objectResponse.SizeBytes),
+				Checksum:        resp.Msg.Checksum,
+				ContentType:     api.StringPtr(resp.Msg.ContentType),
+				Mtime:           resp.Msg.Mtime.GetSeconds(),
+				Path:            resp.Msg.Path,
+				PhysicalAddress: resp.Msg.PhysicalAddress,
+				SizeBytes:       api.Int64Ptr(resp.Msg.SizeBytes),
 			}
-			//stat, err := upload(ctx, client, source, pathURI, contentType, transport)
-			//if err != nil {
-			//	DieErr(err)
-			//}
 			Write(fsStatTemplate, stat)
 			return
 		}
@@ -339,7 +324,7 @@ var fsUploadCmd = &cobra.Command{
 			Bytes int64
 			Count int64
 		}
-		err = filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
+		err := filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return fmt.Errorf("traverse %s: %w", path, err)
 			}
@@ -365,10 +350,6 @@ var fsUploadCmd = &cobra.Command{
 		}
 		Write(fsRecursiveTemplate, totals)
 	},
-}
-
-func getGrpcClient() (*grpc.ClientConn, error) {
-	return grpc.Dial(":8080", grpc.WithBlock(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 }
 
 func transportMethodFromFlags(direct bool, preSign bool) transportMethod {

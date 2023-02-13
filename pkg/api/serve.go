@@ -5,9 +5,9 @@ package api
 import (
 	"errors"
 	"io"
-	"net"
 	"net/http"
-	"strings"
+
+	"github.com/treeverse/lakefs/gen/lakefs/v1/lakefsv1connect"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/getkin/kin-openapi/openapi3"
@@ -17,7 +17,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/sessions"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	lakefsv1 "github.com/treeverse/lakefs/gen/proto/go/lakefs/v1"
 	"github.com/treeverse/lakefs/pkg/api/params"
 	"github.com/treeverse/lakefs/pkg/auth"
 	"github.com/treeverse/lakefs/pkg/auth/email"
@@ -32,7 +31,6 @@ import (
 	"github.com/treeverse/lakefs/pkg/templater"
 	"github.com/treeverse/lakefs/pkg/upload"
 	"golang.org/x/oauth2"
-	"google.golang.org/grpc"
 )
 
 const (
@@ -97,6 +95,14 @@ func Serve(cfg *config.Config, catalog catalog.Interface, middlewareAuthenticato
 	}
 	r.Mount("/logout", NewLogoutHandler(sessionStore, logger, cfg.Auth.LogoutRedirectURL))
 
+	service := &Service{
+		Catalog:      controller.Catalog,
+		BlockAdapter: controller.BlockAdapter,
+		PathProvider: controller.PathProvider,
+	}
+
+	r.Mount(lakefsv1connect.NewLakeFSServiceHandler(service))
+
 	// Configuration flag to control if the embedded UI is served
 	// or not and assign the correct handler for each case.
 	var rootHandler http.Handler
@@ -110,36 +116,17 @@ func Serve(cfg *config.Config, catalog catalog.Interface, middlewareAuthenticato
 		// and returns a compatible response
 		rootHandler = NewS3GatewayEndpointErrorHandler(gatewayDomains)
 	}
-
-	service := &Service{
-		Catalog:      controller.Catalog,
-		BlockAdapter: controller.BlockAdapter,
-		PathProvider: controller.PathProvider,
-	}
-
-	grpcServer := grpc.NewServer()
-	lakefsv1.RegisterLakeFSServiceServer(grpcServer, service)
 	r.Mount("/", rootHandler)
 
-	listenOn := ":8080"
-	listener, err := net.Listen("tcp", listenOn)
-	if err != nil {
-		panic(err)
-	}
+	return r
 
-	go func() {
-		if err := grpcServer.Serve(listener); err != nil {
-			panic(err)
-		}
-	}()
-
-	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.ProtoMajor == 2 && strings.HasPrefix(request.Header.Get("Content-Type"), "application/grpc") {
-			grpcServer.ServeHTTP(writer, request)
-		} else {
-			r.ServeHTTP(writer, request)
-		}
-	})
+	//return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	//	if request.ProtoMajor == 2 && strings.HasPrefix(request.Header.Get("Content-Type"), "application/grpc") {
+	//		grpcServer.ServeHTTP(writer, request)
+	//	} else {
+	//		r.ServeHTTP(writer, request)
+	//	}
+	//})
 }
 
 func swaggerSpecHandler(w http.ResponseWriter, _ *http.Request) {

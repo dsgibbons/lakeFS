@@ -14,14 +14,6 @@ message GetObjectRequest {
   bool pre_signed = 5;
 }
 
-//message GetObjectInfo {
-//  string etag = 1;
-//  string last_modified = 2;
-//  string content_type = 3;
-//  int64 content_length = 4;
-//  string content_range = 5;
-//}
-
 message GetObjectResponse {
   bytes chunk = 1;
   string pre_signed_url = 2;
@@ -54,7 +46,41 @@ message UploadObjectResponse {
   string content_type = 7;
 }
 
+message ListObjectsRequest {
+  string repository = 1;
+  string ref = 2;
+  bool user_metadata = 3;
+  bool pre_signed = 4;
+  string delimiter = 5;
+  string prefix = 6;
+  int32 page_size = 7;
+  string page_token = 8;
+}
+
+enum PathType {
+  PATH_TYPE_UNSPECIFIED = 0;
+  PATH_TYPE_OBJECT = 1;
+  PATH_TYPE_COMMON_PREFIX = 2;
+}
+
+message ObjectInfo  {
+  string path = 1;
+  PathType path_type = 2;
+  string physical_address = 3;
+  string checksum = 4;
+  int64 size_bytes = 5;
+  google.protobuf.Timestamp mtime = 6;
+  map<string, string> user_metadata = 7;
+  string content_type = 8;
+}
+
+message ListObjectsResponse {
+  repeated ObjectInfo objects = 1;
+  string next_page_token = 2;
+}
+
 service LakeFSService {
-    rpc GetObject(GetObjectRequest) returns (stream GetObjectResponse) {}
-    rpc UploadObject(stream UploadObjectRequest) returns (UploadObjectResponse) {}
+  rpc GetObject(GetObjectRequest) returns (stream GetObjectResponse) {}
+  rpc UploadObject(stream UploadObjectRequest) returns (UploadObjectResponse) {}
+  rpc ListObjects(ListObjectsRequest) returns (ListObjectsResponse) {}
 }
