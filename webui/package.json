@@ -10,9 +10,12 @@
     "serve": "vite preview",
     "test": "jest src",
     "lint": "eslint src --ext .js,.jsx,.ts,.tsx",
-    "typesync": "npx typesync"
+    "typesync": "npx typesync",
+    "buf:generate": "buf generate ../api"
   },
   "dependencies": {
+    "@bufbuild/connect-web": "^0.7.0",
+    "@bufbuild/protobuf": "^1.0.0",
     "@duckdb/duckdb-wasm": "^1.20.0",
     "@emotion/react": "^11.10.5",
     "@emotion/styled": "^11.10.5",
@@ -38,6 +41,8 @@
     "validator": "^13.7.0"
   },
   "devDependencies": {
+    "@bufbuild/protoc-gen-connect-web": "^0.7.0",
+    "@bufbuild/protoc-gen-es": "^1.0.0",
     "@rollup/plugin-replace": "^4.0.0",
     "@types/bootstrap": "^5.2.6",
     "@types/jest": "^29.0.3",

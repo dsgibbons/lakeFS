@@ -1,5 +1,8 @@
 import queryString from "query-string"
 
+import {createConnectTransport, createPromiseClient} from "@bufbuild/connect-web";
+import {LakeFSService} from "../../../gen/lakefs/v1/lakefs_connectweb"
+
 export const API_ENDPOINT = '/api/v1';
 export const DEFAULT_LISTING_AMOUNT = 100;
 
@@ -578,13 +581,26 @@ class Tags {
 
 class Objects {
 
-    async list(repoId, ref, tree, after = "", amount = DEFAULT_LISTING_AMOUNT, readUncommitted = true, delimiter = "/") {
-        const query = qs({prefix: tree, amount, after, readUncommitted, delimiter});
-        const response = await apiRequest(`/repositories/${encodeURIComponent(repoId)}/refs/${encodeURIComponent(ref)}/objects/ls?` + query);
-        if (response.status !== 200) {
-            throw new Error(await extractError(response));
-        }
-        return await response.json();
+    constructor(client) {
+        this.client = client;
+    }
+
+    async list(repoId, ref, prefix, after = "", amount = DEFAULT_LISTING_AMOUNT, delimiter = "/") {
+        const response = await this.client.listObjects({
+            repository: repoId,
+            ref: ref,
+            prefix: prefix,
+            delimiter: delimiter,
+            pageSize: amount,
+            pageToken: after,
+        });
+        return response;
+        // const query = qs({prefix, amount, after, delimiter});
+        // const response = await apiRequest(`/repositories/${encodeURIComponent(repoId)}/refs/${encodeURIComponent(ref)}/objects/ls?` + query);
+        // if (response.status !== 200) {
+        //     throw new Error(await extractError(response));
+        // }
+        // return await response.json();
     }
 
     async upload(repoId, branchId, path, fileObject) {
@@ -1006,10 +1022,30 @@ class Statistics {
     }
 }
 
+
+const transport = createConnectTransport({
+    // Requests will be made to <baseUrl>/<package>.<service>/method
+    baseUrl: "http://localhost:3000",
+
+    // By default, connect-web clients use the JSON format.
+    // Set this option to true to use the binary format.
+    useBinaryFormat: false,
+
+    // Controls what the fetch client will do with credentials, such as
+    // Cookies. The default value is "same-origin", which will not
+    // transmit Cookies in cross-origin requests.
+    credentials: "same-origin",
+
+    // Interceptors apply to all calls running through this transport.
+    interceptors: [],
+});
+const client = createPromiseClient(LakeFSService, transport);
+
+
 export const repositories = new Repositories();
 export const branches = new Branches();
 export const tags = new Tags();
-export const objects = new Objects();
+export const objects = new Objects(client);
 export const commits = new Commits();
 export const refs = new Refs();
 export const setup = new Setup();

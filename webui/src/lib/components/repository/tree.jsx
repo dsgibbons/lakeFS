@@ -36,10 +36,9 @@ import noop from "lodash/noop";
 
 export const humanSize = (bytes) => {
   if (!bytes) return "0.0 B";
-  const e = Math.floor(Math.log(bytes) / Math.log(1024));
-  return (
-    (bytes / Math.pow(1024, e)).toFixed(1) + " " + " KMGTP".charAt(e) + "B"
-  );
+  const n = Number(bytes)
+  const e = Math.floor(Math.log(n) / Math.log(1024));
+  return ((n / Math.pow(1024, e)).toFixed(1) + " " + " KMGTP".charAt(e) + "B");
 };
 
 const Na = () => <span>&mdash;</span>;
@@ -73,7 +72,7 @@ const EntryRowActions = ({ repo, reference, entry, onDelete }) => {
         </Dropdown.Toggle>
 
         <Dropdown.Menu>
-          {entry.path_type === "object" && (
+          {entry.pathType === "PATH_TYPE_OBJECT" && (
             <PathLink
               path={entry.path}
               reference={reference}
@@ -83,7 +82,7 @@ const EntryRowActions = ({ repo, reference, entry, onDelete }) => {
               <DownloadIcon /> Download
             </PathLink>
           )}
-          {entry.path_type === "object" && (
+          {entry.pathType === "PATH_TYPE_OBJECT" && (
             <Dropdown.Item
               onClick={(e) => {
                 e.preventDefault();
@@ -108,7 +107,7 @@ const EntryRowActions = ({ repo, reference, entry, onDelete }) => {
           >
             <PasteIcon /> Copy URI
           </Dropdown.Item>
-          {entry.path_type === "object" && reference.type === RefTypeBranch && (
+          {entry.pathType === "PATH_TYPE_OBJECT" && reference.type === RefTypeBranch && (
             <>
               <Dropdown.Divider />
               <Dropdown.Item
@@ -170,14 +169,14 @@ const StatModal = ({ show, onHide, entry }) => {
                 <strong>Physical Address</strong>
               </td>
               <td>
-                <code>{entry.physical_address}</code>
+                <code>{entry.physicalAddress}</code>
               </td>
             </tr>
             <tr>
               <td>
                 <strong>Size (Bytes)</strong>
               </td>
-              <td>{`${entry.size_bytes}  (${humanSize(entry.size_bytes)})`}</td>
+              <td>{`${entry.sizeBytes}  (${humanSize(entry.sizeBytes)})`}</td>
             </tr>
             <tr>
               <td>
@@ -191,17 +190,16 @@ const StatModal = ({ show, onHide, entry }) => {
               <td>
                 <strong>Last Modified</strong>
               </td>
-              <td>{`${dayjs.unix(entry.mtime).fromNow()} (${dayjs
-                .unix(entry.mtime)
+              <td>{`${dayjs(entry.mtime).fromNow()} (${dayjs(entry.mtime)
                 .format("MM/DD/YYYY HH:mm:ss")})`}</td>
             </tr>
-            {entry.content_type && (
+            {entry.contentType && (
               <tr>
                 <td>
                   <strong>Content-Type</strong>
                 </td>
                 <td>
-                  <code>{entry.content_type}</code>
+                  <code>{entry.contentType}</code>
                 </td>
               </tr>
             )}
@@ -245,13 +243,13 @@ const OriginModal = ({ show, onHide, entry, repo, reference }) => {
         repo.id,
         reference.id,
         entry.path,
-        entry.path_type
+        entry.pathType
       );
     }
     return null;
   }, [show, repo.id, reference.id, entry.path]);
 
-  const pathType = entry.path_type === "object" ? "object" : "prefix";
+  const pathType = entry.pathType === "PATH_TYPE_OBJECT" ? "object" : "prefix";
 
   let content = <Loading />;
 
@@ -396,7 +394,7 @@ const EntryRow = ({ repo, reference, path, entry, onDelete, showActions }) => {
   const query = { ref: reference.id, path: entry.path };
 
   let button;
-  if (entry.path_type === "common_prefix") {
+  if (entry.pathType === "PATH_TYPE_COMMON_PREFIX") {
     button = (
       <Link href={{ pathname: "/repositories/:repoId/objects", query, params }}>
         {buttonText}
@@ -423,21 +421,21 @@ const EntryRow = ({ repo, reference, path, entry, onDelete, showActions }) => {
   }
 
   let size;
-  if (entry.diff_type === "removed" || entry.path_type === "common_prefix") {
+  if (entry.diff_type === "removed" || entry.pathType === "PATH_TYPE_COMMON_PREFIX") {
     size = <Na />;
   } else {
     size = (
       <OverlayTrigger
         placement="bottom"
-        overlay={<Tooltip>{entry.size_bytes} bytes</Tooltip>}
+        overlay={<Tooltip>{entry.sizeBytes} bytes</Tooltip>}
       >
-        <span>{humanSize(entry.size_bytes)}</span>
+        <span>{humanSize(entry.sizeBytes)}</span>
       </OverlayTrigger>
     );
   }
 
   let modified;
-  if (entry.diff_type === "removed" || entry.path_type === "common_prefix") {
+  if (entry.diff_type === "removed" || entry.pathType === "PATH_TYPE_COMMON_PREFIX") {
     modified = <Na />;
   } else {
     modified = (
@@ -445,11 +443,11 @@ const EntryRow = ({ repo, reference, path, entry, onDelete, showActions }) => {
         placement="bottom"
         overlay={
           <Tooltip>
-            {dayjs.unix(entry.mtime).format("MM/DD/YYYY HH:mm:ss")}
+            {dayjs(entry.mtime).format("MM/DD/YYYY HH:mm:ss")}
           </Tooltip>
         }
       >
-        <span>{dayjs.unix(entry.mtime).fromNow()}</span>
+        <span>{dayjs(entry.mtime).fromNow()}</span>
       </OverlayTrigger>
     );
   }
@@ -513,7 +511,7 @@ const EntryRow = ({ repo, reference, path, entry, onDelete, showActions }) => {
       <tr className={rowClass}>
         <td className="diff-indicator">{diffIndicator}</td>
         <td className="tree-path">
-          {entry.path_type === "common_prefix" ? (
+          {entry.pathType === "PATH_TYPE_COMMON_PREFIX" ? (
             <FileDirectoryIcon />
           ) : (
             <FileIcon />

@@ -14,6 +14,9 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
+
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/fsnotify/fsnotify"
 	"github.com/go-co-op/gocron"
@@ -336,35 +339,44 @@ var runCmd = &cobra.Command{
 
 		bufferedCollector.CollectEvent(stats.Event{Class: "global", Name: "run"})
 
-		logger.WithField("listen_address", cfg.ListenAddress).Info("starting HTTP server")
+		logger.WithFields(logging.Fields{
+			"listen_address": cfg.ListenAddress,
+			"listen_secure":  cfg.ListenSecure,
+		}).Info("starting HTTP server")
+		serverHandler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			// If the request has the S3 GW domain (exact or subdomain) - or carries an AWS sig, serve S3GW
+			//if request.ProtoMajor != 2 && (httputil.HostMatches(request, cfg.Gateways.S3.DomainNames) ||
+			//	httputil.HostSubdomainOf(request, cfg.Gateways.S3.DomainNames) ||
+			//	sig.IsAWSSignedRequest(request)) {
+			//	s3gatewayHandler.ServeHTTP(writer, request)
+			//	return
+			//}
+			if httputil.HostMatches(request, cfg.Gateways.S3.DomainNames) ||
+				httputil.HostSubdomainOf(request, cfg.Gateways.S3.DomainNames) ||
+				sig.IsAWSSignedRequest(request) {
+				s3gatewayHandler.ServeHTTP(writer, request)
+				return
+			}
+
+			// Otherwise, serve the API handler
+			apiHandler.ServeHTTP(writer, request)
+		})
 		server := &http.Server{
 			Addr:              cfg.ListenAddress,
 			ReadHeaderTimeout: time.Minute,
-			// Handler:           apiHandler,
-			Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-				// If the request has the S3 GW domain (exact or subdomain) - or carries an AWS sig, serve S3GW
-				//if request.ProtoMajor != 2 && (httputil.HostMatches(request, cfg.Gateways.S3.DomainNames) ||
-				//	httputil.HostSubdomainOf(request, cfg.Gateways.S3.DomainNames) ||
-				//	sig.IsAWSSignedRequest(request)) {
-				//	s3gatewayHandler.ServeHTTP(writer, request)
-				//	return
-				//}
-				if httputil.HostMatches(request, cfg.Gateways.S3.DomainNames) ||
-					httputil.HostSubdomainOf(request, cfg.Gateways.S3.DomainNames) ||
-					sig.IsAWSSignedRequest(request) {
-					s3gatewayHandler.ServeHTTP(writer, request)
-					return
-				}
-
-				// Otherwise, serve the API handler
-				apiHandler.ServeHTTP(writer, request)
-			}),
+			Handler:           serverHandler,
 		}
-
 		actionsService.SetEndpoint(server)
 
 		go func() {
-			if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if cfg.ListenSecure {
+				err = server.ListenAndServeTLS(cfg.CertFile, cfg.KeyFile)
+			} else {
+				// wrap handler to handle h2c without tls
+				server.Handler = h2c.NewHandler(server.Handler, &http2.Server{})
+				err = server.ListenAndServe()
+			}
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
 				_, _ = fmt.Fprintf(os.Stderr, "Failed to listen on %s: %v\n", cfg.ListenAddress, err)
 				os.Exit(1)
 			}

@@ -264,8 +264,9 @@ const TreeContainer = ({
                            onImport,
                            refreshToken
                        }) => {
-    const {results, error, loading, nextPage} = useAPIWithPagination(() => {
-        return objects.list(repo.id, reference.id, path, after)
+    const {results, error, loading, nextPage} = useAPIWithPagination(async () => {
+        const r = await objects.list(repo.id, reference.id, path, after)
+        return {results: r.objects};
     }, [repo.id, reference.id, path, after, refreshToken]);
     const initialState = {
         inProgress: false,
