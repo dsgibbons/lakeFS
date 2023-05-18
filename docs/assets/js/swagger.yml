@@ -3652,6 +3652,40 @@ paths:
         default:
           $ref: "#/components/responses/ServerError"
 
+  /repositories/{repository}/branches/{branch}/objects/stage_allowed:
+    parameters:
+      - in: path
+        name: repository
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: branch
+        required: true
+        schema:
+          type: string
+      - in: query
+        name: path
+        description: relative to the branch
+        required: true
+        schema:
+          type: string
+    get:
+      tags:
+        - objects
+      operationId: uploadObjectPreflight
+      responses:
+        204:
+          description: User has permissions to upload this object. This does not guarantee that the upload will be successful or even possible. It indicates only the permission at the time of calling this endpoint
+        401:
+          $ref: "#/components/responses/Unauthorized"
+        403:
+          $ref: "#/components/responses/Forbidden"
+        404:
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/ServerError"
+
   /repositories/{repository}/branches/{branch}/objects:
     parameters:
       - in: path
@@ -3690,21 +3724,6 @@ paths:
                 $ref: "#/components/schemas/ObjectStats"
         400:
           $ref: "#/components/responses/ValidationError"
-        401:
-          $ref: "#/components/responses/Unauthorized"
-        403:
-          $ref: "#/components/responses/Forbidden"
-        404:
-          $ref: "#/components/responses/NotFound"
-        default:
-          $ref: "#/components/responses/ServerError"
-    options:
-      tags:
-        - objects
-      operationId: uploadObjectPreflight
-      responses:
-        204:
-          description: User has permissions to upload this object. This does not guarantee that the upload will be successful or even possible. It indicates only the permission at the time of calling this endpoint
         401:
           $ref: "#/components/responses/Unauthorized"
         403:
@@ -4248,6 +4267,27 @@ paths:
         default:
           $ref: "#/components/responses/ServerError"
 
+  /repositories/{repository}/gc/rules/set_allowed:
+    parameters:
+      - in: path
+        name: repository
+        required: true
+        schema:
+          type: string
+    get:
+      tags:
+        - retention
+      operationId: setGarbageCollectionRulesPreflight
+      responses:
+        204:
+          description: User has permissions to set garbage collection rules on this repository
+        401:
+          $ref: "#/components/responses/Unauthorized"
+        404:
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/ServerError"
+
   /repositories/{repository}/gc/rules:
     parameters:
       - in: path
@@ -4266,20 +4306,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/GarbageCollectionRules"
-        401:
-          $ref: "#/components/responses/Unauthorized"
-        404:
-          $ref: "#/components/responses/NotFound"
-        default:
-          $ref: "#/components/responses/ServerError"
-    
-    options:
-      tags:
-        - retention
-      operationId: setGarbageCollectionRulesPreflight
-      responses:
-        204:
-          description: User has permissions to set garbage collection rules on this repository
         401:
           $ref: "#/components/responses/Unauthorized"
         404:
@@ -4384,6 +4410,27 @@ paths:
         default:
           $ref: "#/components/responses/ServerError"
 
+  /repositories/{repository}/branch_protection/set_allowed:
+    parameters:
+      - in: path
+        name: repository
+        required: true
+        schema:
+          type: string
+    get:
+      tags:
+        - repositories
+      operationId: createBranchProtectionRulePreflight
+      responses:
+        204:
+          description: User has permissions to create a branch protection rule in this repository
+        401:
+          $ref: "#/components/responses/Unauthorized"
+        404:
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/ServerError"
+
   /repositories/{repository}/branch_protection:
     parameters:
       - in: path
@@ -4405,19 +4452,6 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/BranchProtectionRule"
-        401:
-          $ref: "#/components/responses/Unauthorized"
-        404:
-          $ref: "#/components/responses/NotFound"
-        default:
-          $ref: "#/components/responses/ServerError"
-    options:
-      tags:
-        - repositories
-      operationId: createBranchProtectionRulePreflight
-      responses:
-        204:
-          description: User has permissions to create a branch protection rule in this repository
         401:
           $ref: "#/components/responses/Unauthorized"
         404:
